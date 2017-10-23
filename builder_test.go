@@ -26,11 +26,9 @@ func TestName2(t *testing.T) {
 type Filter string
 type Key string
 
-// TODO: error mapping: error -> StatusCode
-
 type service struct{}
 
-func (s *service) CreateFilters(assortment string, id uint64, filters []Filter, headers http.Header, queryValues url.Values, cookies []*http.Cookie) (Key, error) {
+func (s *service) CreateFilters(assortment string, id uint64, queryValues url.Values, headers http.Header, filters []Filter, cookies []*http.Cookie) (Key, error) {
 	fmt.Println(assortment, id, filters, headers, queryValues)
 	return "", nil
 }
