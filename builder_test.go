@@ -35,25 +35,6 @@ func (s *service) CreateFilters(assortment string, id uint64, filters []Filter, 
 	return "", nil
 }
 
-func TestPathValueRange(t *testing.T) {
-	for index, toCheck := range []struct {
-		uri      string
-		from     int
-		expected int
-	}{
-		{uri: "/:bcd", from: 0, expected: 1},
-		{uri: "/a/:bcd", from: 0, expected: 3},
-	} {
-		segment, found := pathValueSegmentOffset(toCheck.uri, toCheck.from)
-		if !found {
-			t.FailNow()
-		}
-		if segment != toCheck.expected {
-			t.Error("index:", index, "unexpected:", segment, "expects:", toCheck.expected)
-		}
-	}
-}
-
 func TestPathValueSegmentOffsets(t *testing.T) {
 	for index, toCheck := range []struct {
 		uri      string

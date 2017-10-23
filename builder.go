@@ -92,14 +92,6 @@ func pathValueSegmentOffsets(requestURI string) []int {
 	}
 }
 
-func pathValueSegmentOffset(requestURI string, from int) (int, bool) {
-	start := strings.Index(requestURI[from:], pathTemplateStart)
-	if start == -1 {
-		return 0, false
-	}
-	return start + 1 + from, true
-}
-
 func POST(urlPathTemplate string) Builder {
 	pathParamsAmount := strings.Count(urlPathTemplate, pathTemplateStart)
 	pathValues := func(uri string) []string { return []string{uri} }
@@ -302,6 +294,7 @@ func (b *builder) By(service interface{}) Builder {
 }
 
 // TODO: need to put Values in same order as service function has
+// looks like I need to put [0, n] at first as PathParameters and for all the others it should be [][2]int - slice of ranges
 func (b *builder) invokeService(r *http.Request) ([]reflect.Value, error) {
 	if b.err != nil {
 		return nil, b.err
