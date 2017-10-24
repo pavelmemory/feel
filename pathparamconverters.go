@@ -9,6 +9,8 @@ type PathParameterConverter interface {
 	Convert(pathPart string) (reflect.Value, error)
 }
 
+var PathParameterConverterType = reflect.TypeOf((*PathParameterConverter)(nil)).Elem()
+
 type StringPathParameterConverter struct{}
 
 func (sc StringPathParameterConverter) Convert(pathPart string) (reflect.Value, error) {
@@ -62,3 +64,16 @@ func (sbc SliceBytePathParameterConverter) Convert(pathPart string) (reflect.Val
 }
 
 var sliceBytePathParameterConverterSingleton = SliceBytePathParameterConverter{}
+
+type ArrayBytePathParameterConverter struct {
+	length      int
+	elementType reflect.Type
+}
+
+func (abc ArrayBytePathParameterConverter) Convert(pathPart string) (reflect.Value, error) {
+	arrayType := reflect.ArrayOf(abc.length, abc.elementType)
+	arrayValuePtr := reflect.New(arrayType)
+	arrayValue := arrayValuePtr.Elem()
+	reflect.Copy(arrayValue, reflect.ValueOf(pathPart))
+	return arrayValue, nil
+}

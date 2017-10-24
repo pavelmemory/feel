@@ -33,6 +33,55 @@ func (s *service) CreateFilters(assortment string, id uint64, queryValues url.Va
 	return "", nil
 }
 
+func (s *service) ArrayAsPathParameterHolder(assortment []byte) {
+	fmt.Println(string(assortment))
+}
+
+func TestArrayAsPathParameterHolder(t *testing.T) {
+	s := service{}
+	by := GET("/:assortment").By(s.ArrayAsPathParameterHolder)
+	r, err := http.NewRequest(http.MethodGet, "http://localhost:8080/a1", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = by.(*builder).invokeService(r)
+	if err != nil {
+		t.Error(err)
+	}
+}
+
+type UserDefinedPathType string
+
+var _ PathParameterConverter = UserDefinedPathType("")
+
+func (UserDefinedPathType) Convert(pathPart string) (reflect.Value, error) {
+	udp := UserDefinedPathType(pathPart)
+	return reflect.ValueOf(udp), nil
+}
+
+func (ud UserDefinedPathType) String() string {
+	return "UserDefinedPathType: " + string(ud)
+}
+
+func (s *service) UserDefinedTypeAsPathParameterHolder(assortment UserDefinedPathType) {
+	fmt.Println(assortment)
+}
+
+func TestUserDefinedTypeAsPathParameterHolder(t *testing.T) {
+	s := service{}
+	by := GET("/:assortment").By(s.UserDefinedTypeAsPathParameterHolder)
+	r, err := http.NewRequest(http.MethodGet, "http://localhost:8080/a1", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = by.(*builder).invokeService(r)
+	if err != nil {
+		t.Error(err)
+	}
+}
+
 func TestPathValueSegmentOffsets(t *testing.T) {
 	for index, toCheck := range []struct {
 		uri      string
