@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/url"
 	"reflect"
-	"strconv"
 	"strings"
 )
 
@@ -40,8 +39,6 @@ var (
 	cookiesType    = reflect.TypeOf([]*http.Cookie{})
 	errorType      = reflect.TypeOf((*error)(nil)).Elem()
 	httpStatusType = reflect.TypeOf(http.StatusOK)
-
-	emptyPathValueRange = [2]int{}
 )
 
 const (
@@ -57,10 +54,8 @@ const (
 	respHeaderParametersGroup
 	respCookieParametersGroup
 
-	pathTemplateStart    = "/:"
-	pathTemplateStartLen = len(pathTemplateStart)
-	pathTemplateEnd      = "/"
-	pathTemplateEndLen   = len(pathTemplateEnd)
+	pathTemplateStart = "/:"
+	pathTemplateEnd   = "/"
 )
 
 type Builder interface {
@@ -158,109 +153,63 @@ func (b *builder) definePathParameters() {
 	}
 
 	pathParameters := b.parametersBy[pathParametersGroup]
-	var converters []func(string) (reflect.Value, error)
+	var converters []PathParameterConverter
 	for _, pathParameterType := range pathParameters {
-		var converter func(string) (reflect.Value, error)
+		var converter PathParameterConverter
 		switch pathParameterType.Kind() {
 		case reflect.String:
-			converter = func(value string) (reflect.Value, error) { return reflect.ValueOf(value), nil }
+			converter = stringPathParameterConverterSingleton
 		case reflect.Int8:
-			converter = func(value string) (reflect.Value, error) {
-				parsed, err := strconv.ParseInt(value, 10, 8)
-				if err != nil {
-					return reflect.Value{}, err
-				}
-				return reflect.ValueOf(int8(parsed)), nil
-			}
+			converter = IntPathParameterConverter{bitSize: 8, valueOf: func(d interface{}) reflect.Value {
+				return reflect.ValueOf(d.(int8))
+			}}
 		case reflect.Int16:
-			converter = func(value string) (reflect.Value, error) {
-				parsed, err := strconv.ParseInt(value, 10, 16)
-				if err != nil {
-					return reflect.Value{}, err
-				}
-				return reflect.ValueOf(int16(parsed)), nil
-			}
+			converter = IntPathParameterConverter{bitSize: 16, valueOf: func(d interface{}) reflect.Value {
+				return reflect.ValueOf(d.(int16))
+			}}
 		case reflect.Int32:
-			converter = func(value string) (reflect.Value, error) {
-				parsed, err := strconv.ParseInt(value, 10, 32)
-				if err != nil {
-					return reflect.Value{}, err
-				}
-				return reflect.ValueOf(int32(parsed)), nil
-			}
+			converter = IntPathParameterConverter{bitSize: 32, valueOf: func(d interface{}) reflect.Value {
+				return reflect.ValueOf(d.(int32))
+			}}
 		case reflect.Int64:
-			converter = func(value string) (reflect.Value, error) {
-				parsed, err := strconv.ParseInt(value, 10, 64)
-				if err != nil {
-					return reflect.Value{}, err
-				}
-				return reflect.ValueOf(int64(parsed)), nil
-			}
+			converter = IntPathParameterConverter{bitSize: 64, valueOf: func(d interface{}) reflect.Value {
+				return reflect.ValueOf(d.(int64))
+			}}
 		case reflect.Int:
-			converter = func(value string) (reflect.Value, error) {
-				parsed, err := strconv.ParseInt(value, 10, 32)
-				if err != nil {
-					return reflect.Value{}, err
-				}
-				return reflect.ValueOf(int(parsed)), nil
-			}
+			converter = IntPathParameterConverter{bitSize: 32, valueOf: func(d interface{}) reflect.Value {
+				return reflect.ValueOf(d.(int))
+			}}
 		case reflect.Uint8:
-			converter = func(value string) (reflect.Value, error) {
-				parsed, err := strconv.ParseUint(value, 10, 8)
-				if err != nil {
-					return reflect.Value{}, err
-				}
-				return reflect.ValueOf(uint8(parsed)), nil
-			}
+			converter = UintPathParameterConverter{bitSize: 8, valueOf: func(d interface{}) reflect.Value {
+				return reflect.ValueOf(d.(uint8))
+			}}
 		case reflect.Uint16:
-			converter = func(value string) (reflect.Value, error) {
-				parsed, err := strconv.ParseUint(value, 10, 16)
-				if err != nil {
-					return reflect.Value{}, err
-				}
-				return reflect.ValueOf(uint16(parsed)), nil
-			}
+			converter = UintPathParameterConverter{bitSize: 16, valueOf: func(d interface{}) reflect.Value {
+				return reflect.ValueOf(d.(uint16))
+			}}
 		case reflect.Uint32:
-			converter = func(value string) (reflect.Value, error) {
-				parsed, err := strconv.ParseUint(value, 10, 32)
-				if err != nil {
-					return reflect.Value{}, err
-				}
-				return reflect.ValueOf(uint32(parsed)), nil
-			}
+			converter = UintPathParameterConverter{bitSize: 32, valueOf: func(d interface{}) reflect.Value {
+				return reflect.ValueOf(d.(uint32))
+			}}
 		case reflect.Uint64:
-			converter = func(value string) (reflect.Value, error) {
-				parsed, err := strconv.ParseUint(value, 10, 64)
-				if err != nil {
-					return reflect.Value{}, err
-				}
-				return reflect.ValueOf(uint64(parsed)), nil
-			}
+			converter = UintPathParameterConverter{bitSize: 64, valueOf: func(d interface{}) reflect.Value {
+				return reflect.ValueOf(d.(uint64))
+			}}
 		case reflect.Uint:
-			converter = func(value string) (reflect.Value, error) {
-				parsed, err := strconv.ParseUint(value, 10, 32)
-				if err != nil {
-					return reflect.Value{}, err
-				}
-				return reflect.ValueOf(uint(parsed)), nil
-			}
+			converter = UintPathParameterConverter{bitSize: 32, valueOf: func(d interface{}) reflect.Value {
+				return reflect.ValueOf(d.(uint))
+			}}
 		case reflect.Bool:
-			converter = func(value string) (reflect.Value, error) {
-				parsed, err := strconv.ParseBool(value)
-				if err != nil {
-					return reflect.Value{}, err
-				}
-				return reflect.ValueOf(bool(parsed)), nil
-			}
+			converter = boolPathParameterConverterSingleton
 		case reflect.Slice, reflect.Array:
 			if pathParameterType.Elem().Kind() != reflect.Uint8 {
 				b.err = errors.New("supports only slice/array of bytes")
 				return
 			}
-			converter = func(value string) (reflect.Value, error) {
-				return reflect.ValueOf([]byte(value)), nil
-			}
+			// TODO: we need to make appropriate casting for arrays - depending of the size or just not support them
+			converter = sliceBytePathParameterConverterSingleton
 		default:
+			// TODO: add support of user-defined types that implements 'PathParameterConverter' interface
 			b.err = errors.New("unsupported type for path parameter: " + pathParameterType.String())
 			return
 		}
@@ -276,7 +225,7 @@ func (b *builder) definePathParameters() {
 			}
 			for i := 0; i < amountPathValues; i++ {
 				var value reflect.Value
-				value, err = converters[i](pathValues[i])
+				value, err = converters[i].Convert(pathValues[i])
 				if err != nil {
 					return
 				}
@@ -586,3 +535,4 @@ func (b *builder) hasError() bool {
 // TODO: Header parameters into user-defined types - ???
 // TODO: Query parameters into user-defined types - must implement interface for decoding query into itself
 // maybe there will be some policy in naming those user-defined types
+// TODO: make normal error reporting with error codes that signals generic cause and context specific info (maybe stack-trace)
