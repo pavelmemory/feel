@@ -138,8 +138,9 @@ func newBuilder(method, urlPathTemplate string) *builder {
 					values = append(values, uri[startAt:])
 					return values
 				}
+				endAt += startAt
 				values = append(values, uri[startAt:endAt])
-				from = endAt + 1
+				from = endAt
 			}
 			return values
 		}
@@ -201,44 +202,44 @@ func (b *builder) definePathParameters() {
 			case reflect.String:
 				converter = stringPathParameterConverterSingleton
 			case reflect.Int8:
-				converter = IntPathParameterConverter{bitSize: 8, valueOf: func(d interface{}) reflect.Value {
-					return reflect.ValueOf(d.(int8))
+				converter = IntPathParameterConverter{bitSize: 8, valueOf: func(parsed int64) reflect.Value {
+					return reflect.ValueOf(int8(parsed))
 				}}
 			case reflect.Int16:
-				converter = IntPathParameterConverter{bitSize: 16, valueOf: func(d interface{}) reflect.Value {
-					return reflect.ValueOf(d.(int16))
+				converter = IntPathParameterConverter{bitSize: 16, valueOf: func(parsed int64) reflect.Value {
+					return reflect.ValueOf(int16(parsed))
 				}}
 			case reflect.Int32:
-				converter = IntPathParameterConverter{bitSize: 32, valueOf: func(d interface{}) reflect.Value {
-					return reflect.ValueOf(d.(int32))
+				converter = IntPathParameterConverter{bitSize: 32, valueOf: func(parsed int64) reflect.Value {
+					return reflect.ValueOf(int32(parsed))
 				}}
 			case reflect.Int64:
-				converter = IntPathParameterConverter{bitSize: 64, valueOf: func(d interface{}) reflect.Value {
-					return reflect.ValueOf(d.(int64))
+				converter = IntPathParameterConverter{bitSize: 64, valueOf: func(parsed int64) reflect.Value {
+					return reflect.ValueOf(parsed)
 				}}
 			case reflect.Int:
-				converter = IntPathParameterConverter{bitSize: 32, valueOf: func(d interface{}) reflect.Value {
-					return reflect.ValueOf(d.(int))
+				converter = IntPathParameterConverter{bitSize: 32, valueOf: func(parsed int64) reflect.Value {
+					return reflect.ValueOf(int(parsed))
 				}}
 			case reflect.Uint8:
-				converter = UintPathParameterConverter{bitSize: 8, valueOf: func(d interface{}) reflect.Value {
-					return reflect.ValueOf(d.(uint8))
+				converter = UintPathParameterConverter{bitSize: 8, valueOf: func(parsed uint64) reflect.Value {
+					return reflect.ValueOf(uint8(parsed))
 				}}
 			case reflect.Uint16:
-				converter = UintPathParameterConverter{bitSize: 16, valueOf: func(d interface{}) reflect.Value {
-					return reflect.ValueOf(d.(uint16))
+				converter = UintPathParameterConverter{bitSize: 16, valueOf: func(parsed uint64) reflect.Value {
+					return reflect.ValueOf(uint16(parsed))
 				}}
 			case reflect.Uint32:
-				converter = UintPathParameterConverter{bitSize: 32, valueOf: func(d interface{}) reflect.Value {
-					return reflect.ValueOf(d.(uint32))
+				converter = UintPathParameterConverter{bitSize: 32, valueOf: func(parsed uint64) reflect.Value {
+					return reflect.ValueOf(uint32(parsed))
 				}}
 			case reflect.Uint64:
-				converter = UintPathParameterConverter{bitSize: 64, valueOf: func(d interface{}) reflect.Value {
-					return reflect.ValueOf(d.(uint64))
+				converter = UintPathParameterConverter{bitSize: 64, valueOf: func(parsed uint64) reflect.Value {
+					return reflect.ValueOf(parsed)
 				}}
 			case reflect.Uint:
-				converter = UintPathParameterConverter{bitSize: 32, valueOf: func(d interface{}) reflect.Value {
-					return reflect.ValueOf(d.(uint))
+				converter = UintPathParameterConverter{bitSize: 32, valueOf: func(parsed uint64) reflect.Value {
+					return reflect.ValueOf(uint(parsed))
 				}}
 			case reflect.Bool:
 				converter = boolPathParameterConverterSingleton
@@ -383,7 +384,7 @@ func (b *builder) groupRequestOtherParameters(serviceType reflect.Type) {
 		return
 	}
 
-	doForGroup := func(parameterType reflect.Type, errorMsg string, group int) bool {
+	addToGroup := func(parameterType reflect.Type, errorMsg string, group int) bool {
 		if len(b.parametersBy[group]) > 0 {
 			b.err = errors.New(errorMsg)
 			return false
@@ -398,13 +399,13 @@ func (b *builder) groupRequestOtherParameters(serviceType reflect.Type) {
 		parameterType := serviceType.In(i)
 		switch parameterType {
 		case headersType:
-			noError = doForGroup(parameterType, "unable do mapping of headers to more than 1 parameter in service function", headerParametersGroup)
+			noError = addToGroup(parameterType, "unable do mapping of headers to more than 1 parameter in service function", headerParametersGroup)
 		case urlQueryType:
-			noError = doForGroup(parameterType, "unable do mapping of URL query values to more than 1 parameter in service function", queryParametersGroup)
+			noError = addToGroup(parameterType, "unable do mapping of URL query values to more than 1 parameter in service function", queryParametersGroup)
 		case cookiesType:
-			noError = doForGroup(parameterType, "unable do mapping of cookies to more than 1 parameter in service function", cookieParametersGroup)
+			noError = addToGroup(parameterType, "unable do mapping of cookies to more than 1 parameter in service function", cookieParametersGroup)
 		default:
-			noError = doForGroup(parameterType, "unable do mapping of body to more than 1 parameter in service function", bodyParametersGroup)
+			noError = addToGroup(parameterType, "unable do mapping of body to more than 1 parameter in service function", bodyParametersGroup)
 		}
 	}
 }
@@ -521,6 +522,9 @@ func (b *builder) defineBodyParameters() {
 		}
 		b.bodyParameters = func(bodyReader io.Reader) (reflect.Value, error) {
 			entityPtr := reflect.New(bodyParameterTypes[0])
+			if bodyReader == nil {
+				return entityPtr.Elem(), nil
+			}
 			err := b.decoder(bodyReader)(entityPtr.Interface())
 			return reflect.Indirect(entityPtr), err
 		}

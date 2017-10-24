@@ -21,7 +21,7 @@ var stringPathParameterConverterSingleton = StringPathParameterConverter{}
 
 type IntPathParameterConverter struct {
 	bitSize int
-	valueOf func(d interface{}) reflect.Value
+	valueOf func(parsed int64) reflect.Value
 }
 
 func (ic IntPathParameterConverter) Convert(pathPart string) (reflect.Value, error) {
@@ -34,7 +34,7 @@ func (ic IntPathParameterConverter) Convert(pathPart string) (reflect.Value, err
 
 type UintPathParameterConverter struct {
 	bitSize int
-	valueOf func(d interface{}) reflect.Value
+	valueOf func(parsed uint64) reflect.Value
 }
 
 func (uc UintPathParameterConverter) Convert(pathPart string) (reflect.Value, error) {

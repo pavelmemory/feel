@@ -1,51 +1,116 @@
 package main
 
 import (
-	"fmt"
+	"io"
 	"net/http"
+	"net/textproto"
 	"net/url"
 	"reflect"
 	"strings"
 	"testing"
 )
 
-func TestName2(t *testing.T) {
-	s := service{}
-	by := POST("/:assortment/filters/:id").Decoder(JSONDecoder).By(s.CreateFilters).Encoder(XMLEncoder).ErrorMapping()
-	r, err := http.NewRequest(http.MethodPost, "http://localhost:8080/a1/filters/900", strings.NewReader(`["f1", "f2"]`))
-	if err != nil {
-		t.Fatal(err)
-	}
+type Filter string
+type Key string
 
-	_, err = by.(*builder).invokeService(r)
+type service struct {
+	t *testing.T
+}
+
+func (s *service) CreateFilters(assortment string, id uint64, queryValues url.Values, headers http.Header, filters []Filter, cookies []*http.Cookie) (Key, error) {
+	if assortment != "a1" {
+		s.t.Errorf("received: %#v", assortment)
+	}
+	if id != 900 {
+		s.t.Errorf("received: %#v", id)
+	}
+	if len(queryValues) != 2 {
+		s.t.Errorf("received: %#v", queryValues)
+	}
+	if queryValues.Get("qv1") != "100" {
+		s.t.Errorf("received: %#v", queryValues.Get("qv1"))
+	}
+	if queryValues.Get("qv2") != "oops?" {
+		s.t.Errorf("received: %#v", queryValues.Get("qv2"))
+	}
+	if len(headers) != 2 {
+		s.t.Errorf("received: %#v", headers)
+	}
+	h1HeaderKey := textproto.CanonicalMIMEHeaderKey("h1")
+	if headers[h1HeaderKey][0] != "v1" {
+		s.t.Errorf("received: %#v", headers[h1HeaderKey][0])
+	}
+	if headers[h1HeaderKey][1] != "v2" {
+		s.t.Errorf("received: %#v", headers[h1HeaderKey][1])
+	}
+	if len(filters) != 2 {
+		s.t.Errorf("received: %#v", filters)
+	}
+	if filters[0] != "f1" {
+		s.t.Errorf("received: %#v", filters[0])
+	}
+	if filters[1] != "f2" {
+		s.t.Errorf("received: %#v", filters[1])
+	}
+	if len(cookies) != 2 {
+		s.t.Errorf("received: %#v", cookies)
+	}
+	if cookies[0].Name != "c1" || cookies[0].Value != "cv1" {
+		s.t.Errorf("received: %#v", cookies[0])
+	}
+	if cookies[1].Name != "c2" || cookies[1].Value != "cv2" {
+		s.t.Errorf("received: %#v", cookies[1])
+	}
+	return "", nil
+}
+
+func TestAll(t *testing.T) {
+	s := service{t: t}
+	by := POST("/:assortment/filters/:id").Decoder(JSONDecoder).By(s.CreateFilters).Encoder(XMLEncoder).ErrorMapping()
+	r := newPOST(t, "http://localhost:8080/a1/filters/900?qv1=100&qv2=oops%3F", strings.NewReader(`["f1", "f2"]`))
+	r.Header.Set("h1", "v1")
+	r.Header.Add("h1", "v2")
+	r.AddCookie(&http.Cookie{Name: "c1", Value: "cv1"})
+	r.AddCookie(&http.Cookie{Name: "c2", Value: "cv2"})
+
+	_, err := by.(*builder).invokeService(r)
 	if err != nil {
 		t.Error(err)
 	}
 }
 
-type Filter string
-type Key string
-
-type service struct{}
-
-func (s *service) CreateFilters(assortment string, id uint64, queryValues url.Values, headers http.Header, filters []Filter, cookies []*http.Cookie) (Key, error) {
-	fmt.Println(assortment, id, filters, headers, queryValues)
-	return "", nil
-}
-
 func (s *service) ArrayAsPathParameterHolder(assortment []byte) {
-	fmt.Println(string(assortment))
+	if string(assortment) != "a1" {
+		s.t.Errorf("receive: %#v", assortment)
+	}
 }
 
 func TestArrayAsPathParameterHolder(t *testing.T) {
-	s := service{}
+	s := service{t: t}
 	by := GET("/:assortment").By(s.ArrayAsPathParameterHolder)
-	r, err := http.NewRequest(http.MethodGet, "http://localhost:8080/a1", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	r := newGET(t, "http://localhost:8080/a1")
 
-	_, err = by.(*builder).invokeService(r)
+	_, err := by.(*builder).invokeService(r)
+	if err != nil {
+		t.Error(err)
+	}
+}
+
+func (s *service) MultiplePathParameterHolders(id uint16, assortment string) {
+	if id != 666 {
+		s.t.Errorf("receive: %#v", id)
+	}
+	if assortment != "POOW" {
+		s.t.Errorf("receive: %#v", assortment)
+	}
+}
+
+func TestMultiplePathParameterHolders(t *testing.T) {
+	s := service{t: t}
+	by := GET("/some/part/:id/:assortment/here").By(s.MultiplePathParameterHolders)
+	r := newGET(t, "http://localhost:8080/some/part/666/POOW/here")
+
+	_, err := by.(*builder).invokeService(r)
 	if err != nil {
 		t.Error(err)
 	}
@@ -65,21 +130,36 @@ func (ud UserDefinedPathType) String() string {
 }
 
 func (s *service) UserDefinedTypeAsPathParameterHolder(assortment UserDefinedPathType) {
-	fmt.Println(assortment)
+	if assortment.String() != "UserDefinedPathType: a1" {
+		s.t.Errorf("receive: %#v", assortment)
+	}
 }
 
 func TestUserDefinedTypeAsPathParameterHolder(t *testing.T) {
-	s := service{}
+	s := service{t: t}
 	by := GET("/:assortment").By(s.UserDefinedTypeAsPathParameterHolder)
-	r, err := http.NewRequest(http.MethodGet, "http://localhost:8080/a1", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	r := newGET(t, "http://localhost:8080/a1")
 
-	_, err = by.(*builder).invokeService(r)
+	_, err := by.(*builder).invokeService(r)
 	if err != nil {
 		t.Error(err)
 	}
+}
+
+func newPOST(t *testing.T, urlString string, body io.Reader) *http.Request {
+	return newRequest(t, http.MethodPost, urlString, body)
+}
+
+func newGET(t *testing.T, urlString string) *http.Request {
+	return newRequest(t, http.MethodGet, urlString, nil)
+}
+
+func newRequest(t *testing.T, httpMethod, urlString string, body io.Reader) *http.Request {
+	r, err := http.NewRequest(httpMethod, urlString, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
 }
 
 func TestPathValueSegmentOffsets(t *testing.T) {
