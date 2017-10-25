@@ -123,27 +123,30 @@ func TRACE(urlPathTemplate string) Builder {
 	return newBuilder(http.MethodTrace, urlPathTemplate)
 }
 
+func pathValuesByOffsets(offsets []int) func(uri string) []string {
+	return func(uri string) []string {
+		var values []string
+		var from int
+		for _, offset := range offsets {
+			startAt := from + offset
+			endAt := strings.Index(uri[startAt:], "/")
+			if endAt == -1 {
+				values = append(values, uri[startAt:])
+				return values
+			}
+			endAt += startAt
+			values = append(values, uri[startAt:endAt])
+			from = endAt
+		}
+		return values
+	}
+}
+
 func newBuilder(method, urlPathTemplate string) *builder {
 	pathParamsAmount := strings.Count(urlPathTemplate, pathTemplateStart)
 	var pathValues func(uri string) []string
 	if pathParamsAmount > 0 {
-		offsets := pathValueSegmentOffsets(urlPathTemplate)
-		pathValues = func(uri string) []string {
-			var values []string
-			var from int
-			for _, offset := range offsets {
-				startAt := from + offset
-				endAt := strings.Index(uri[startAt:], "/")
-				if endAt == -1 {
-					values = append(values, uri[startAt:])
-					return values
-				}
-				endAt += startAt
-				values = append(values, uri[startAt:endAt])
-				from = endAt
-			}
-			return values
-		}
+		pathValues = pathValuesByOffsets(pathValueSegmentOffsets(urlPathTemplate))
 	} else {
 		pathValues = func(uri string) []string { return []string{uri} }
 	}
@@ -245,18 +248,18 @@ func (b *builder) definePathParameters() {
 				converter = boolPathParameterConverterSingleton
 			case reflect.Slice:
 				if pathParameterType.Elem().Kind() != reflect.Uint8 {
-					b.err = errors.New("supports only slice/array of bytes")
+					b.err = UnsupportedTypeError(errors.New("supports only slice/array of bytes"))
 					return
 				}
 				converter = sliceBytePathParameterConverterSingleton
 			case reflect.Array:
 				if pathParameterType.Elem().Kind() != reflect.Uint8 {
-					b.err = errors.New("supports only array of bytes")
+					b.err = UnsupportedTypeError(errors.New("supports only array of bytes"))
 					return
 				}
 				converter = ArrayBytePathParameterConverter{length: pathParameterType.Len(), elementType: pathParameterType.Elem()}
 			default:
-				b.err = errors.New("unsupported type for path parameter: " + pathParameterType.String())
+				b.err = UnsupportedTypeError(errors.New("for path parameter: " + pathParameterType.String()))
 				return
 			}
 		}
@@ -268,7 +271,7 @@ func (b *builder) definePathParameters() {
 			amountPathValues := len(pathValues)
 			amountConverters := len(converters)
 			if amountPathValues != amountConverters {
-				return values, fmt.Errorf("unexpected amount of path parameters: %d, expected: %d", amountPathValues, amountConverters)
+				return values, InvalidMappingError(fmt.Errorf("unexpected amount of path parameters: %d, expected: %d", amountPathValues, amountConverters))
 			}
 			for i := 0; i < amountPathValues; i++ {
 				var value reflect.Value
@@ -286,7 +289,8 @@ func (b *builder) definePathParameters() {
 func (b *builder) By(service interface{}) Builder {
 	serviceType := reflect.TypeOf(service)
 	if serviceType.Kind() != reflect.Func {
-		panic("handler is not a function")
+		b.err = InvalidMappingError(errors.New("handler is not a function/method"))
+		return b
 	}
 
 	b.groupParameters(serviceType)
@@ -386,7 +390,7 @@ func (b *builder) groupRequestOtherParameters(serviceType reflect.Type) {
 
 	addToGroup := func(parameterType reflect.Type, errorMsg string, group int) bool {
 		if len(b.parametersBy[group]) > 0 {
-			b.err = errors.New(errorMsg)
+			b.err = InvalidMappingError(errors.New(errorMsg))
 			return false
 		}
 		b.parametersBy[group] = append(b.parametersBy[group], parameterType)
@@ -410,6 +414,7 @@ func (b *builder) groupRequestOtherParameters(serviceType reflect.Type) {
 	}
 }
 
+// TODO: do convertion of response params to HTTP response
 func (b *builder) groupResponseParameters(serviceType reflect.Type) {
 	if b.hasError() {
 		return
@@ -424,18 +429,19 @@ func (b *builder) groupResponseParameters(serviceType reflect.Type) {
 			b.parametersBy[respCookieParametersGroup] = append(b.parametersBy[respCookieParametersGroup], parameterType)
 		case httpStatusType == parameterType:
 			if len(b.parametersBy[respStatusCodeParametersGroup]) > 0 {
-				b.err = fmt.Errorf("unable to do mapping of multiple response status codes")
+				b.err = InvalidMappingError(errors.New("unable to map multiple response status codes"))
+				return
 			}
 			b.parametersBy[respStatusCodeParametersGroup] = append(b.parametersBy[respStatusCodeParametersGroup], parameterType)
 		case parameterType.Implements(errorType):
 			if len(b.parametersBy[respErrorParametersGroup]) > 0 {
-				b.err = fmt.Errorf("unable to do mapping of multiple error return values")
+				b.err = InvalidMappingError(errors.New("unable to map multiple error return values"))
 				return
 			}
 			b.parametersBy[respErrorParametersGroup] = append(b.parametersBy[respErrorParametersGroup], parameterType)
 		default:
 			if len(b.parametersBy[respBodyParametersGroup]) > 0 {
-				b.err = fmt.Errorf("unable do mapping body to multiple response entities")
+				b.err = InvalidMappingError(errors.New("unable to map body to multiple response entities"))
 			}
 			b.parametersBy[respBodyParametersGroup] = append(b.parametersBy[respBodyParametersGroup], parameterType)
 		}
@@ -558,3 +564,35 @@ func (b *builder) hasError() bool {
 // maybe there will be some policy in naming those user-defined types
 // TODO: make normal error reporting with error codes that signals generic cause and context specific info (maybe stack-trace)
 // TODO: make normal tests - visually check of prints is not good enough
+
+type GeneralErrorCause error
+
+var (
+	UnsupportedType = errors.New("unsupported type")
+	InvalidMapping  = errors.New("invalid mapping")
+)
+
+func UnsupportedTypeError(contextCause error) error {
+	return Error{GeneralCause: UnsupportedType, ContextCause: contextCause}
+}
+
+func InvalidMappingError(contextCause error) error {
+	return Error{GeneralCause: InvalidMapping, ContextCause: contextCause}
+}
+
+type Error struct {
+	GeneralCause GeneralErrorCause
+	ContextCause error
+}
+
+func (e Error) Error() string {
+	switch {
+	case e.GeneralCause != nil && e.ContextCause != nil:
+		return e.GeneralCause.Error() + ":" + e.ContextCause.Error()
+	case e.GeneralCause != nil:
+		return e.GeneralCause.Error()
+	case e.ContextCause != nil:
+		return e.ContextCause.Error()
+	}
+	return ""
+}
