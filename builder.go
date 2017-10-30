@@ -1,8 +1,7 @@
 package main
 
 import (
-	"encoding/json"
-	"encoding/xml"
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -12,35 +11,6 @@ import (
 	"strings"
 )
 
-type Interceptor func(w http.ResponseWriter, r *http.Request) bool
-
-type Decoder func(reader io.Reader) func(v interface{}) error
-
-type Encoder func(writer io.Writer) func(v interface{}) error
-
-var (
-	JSONDecoder = func(reader io.Reader) func(v interface{}) error {
-		return json.NewDecoder(reader).Decode
-	}
-
-	JSONEncoder = func(writer io.Writer) func(v interface{}) error {
-		return json.NewEncoder(writer).Encode
-	}
-
-	XMLDecoder = func(reader io.Reader) func(v interface{}) error {
-		return xml.NewDecoder(reader).Decode
-	}
-	XMLEncoder = func(writer io.Writer) func(v interface{}) error {
-		return xml.NewEncoder(writer).Encode
-	}
-
-	headersType    = reflect.TypeOf(http.Header{})
-	urlQueryType   = reflect.TypeOf(url.Values{})
-	cookiesType    = reflect.TypeOf([]*http.Cookie{})
-	errorType      = reflect.TypeOf((*error)(nil)).Elem()
-	httpStatusType = reflect.TypeOf(http.StatusOK)
-)
-
 const (
 	pathParametersGroup = iota
 	queryParametersGroup
@@ -48,11 +18,11 @@ const (
 	bodyParametersGroup
 	cookieParametersGroup
 
-	respBodyParametersGroup
-	respErrorParametersGroup
-	respStatusCodeParametersGroup
-	respHeaderParametersGroup
-	respCookieParametersGroup
+	responseBodyParametersGroup
+	responseErrorParametersGroup
+	responseStatusCodeParametersGroup
+	responseHeaderParametersGroup
+	responseCookieParametersGroup
 
 	pathTemplateStart = "/:"
 	pathTemplateEnd   = "/"
@@ -61,10 +31,11 @@ const (
 type Builder interface {
 	Before(interceptor Interceptor) Builder
 	Decoder(decoder Decoder) Builder
-	By(service interface{}) Builder
+	Handler(service interface{}) Builder
 	Encoder(encoder Encoder) Builder
 	After(interceptor Interceptor) Builder
-	ErrorMapping() Builder
+	ErrorMapping(errorMapper ErrorMapper) Builder
+	Build() EndpointProcessor
 }
 
 func pathValueSegmentOffsets(requestURI string) []int {
@@ -142,7 +113,7 @@ func pathValuesByOffsets(offsets []int) func(uri string) []string {
 	}
 }
 
-func newBuilder(method, urlPathTemplate string) *builder {
+func newBuilder(method, urlPathTemplate string) builder {
 	pathParamsAmount := strings.Count(urlPathTemplate, pathTemplateStart)
 	var pathValues func(uri string) []string
 	if pathParamsAmount > 0 {
@@ -151,7 +122,7 @@ func newBuilder(method, urlPathTemplate string) *builder {
 		pathValues = func(uri string) []string { return []string{uri} }
 	}
 
-	return &builder{
+	return builder{
 		method:           method,
 		pathValues:       pathValues,
 		pathParamsAmount: pathParamsAmount,
@@ -173,15 +144,62 @@ type builder struct {
 	queryParameters        func(queryValues url.Values) (reflect.Value, error)
 	cookieParameters       func(cookieValues []*http.Cookie) (reflect.Value, error)
 	bodyParameters         func(bodyReader io.Reader) (reflect.Value, error)
+
+	errorMapper                  ErrorMapper
+	orderOfResponseParameters    []int
+	responseHeaderParameters     func(value reflect.Value) http.Header
+	responseStatusCodeParameters func(value reflect.Value) int
+	responseCookieParameters     func(value reflect.Value) []*http.Cookie
+	responseErrorParameters      func(err error, w http.ResponseWriter, r *http.Request) error
 }
 
-func (b *builder) Before(interceptor Interceptor) Builder {
-	return b
+func (cloned builder) clone() builder {
+	if len(cloned.parametersBy) > 0 {
+		parametersBy := cloned.parametersBy
+		cloned.parametersBy = make(map[int][]reflect.Type)
+		for key, value := range parametersBy {
+			valueCloned := make([]reflect.Type, len(value))
+			copy(valueCloned, value)
+			cloned.parametersBy[key] = valueCloned
+		}
+	}
+
+	if len(cloned.orderOfOtherParameters) > 0 {
+		orderOfOtherParameters := cloned.orderOfOtherParameters
+		cloned.orderOfOtherParameters = make([]int, len(orderOfOtherParameters))
+		copy(cloned.orderOfOtherParameters, orderOfOtherParameters)
+	}
+
+	if len(cloned.orderOfResponseParameters) > 0 {
+		orderOfResponseParameters := cloned.orderOfResponseParameters
+		cloned.orderOfResponseParameters = make([]int, len(orderOfResponseParameters))
+		copy(cloned.orderOfResponseParameters, orderOfResponseParameters)
+	}
+	return cloned
 }
 
-func (b *builder) Decoder(decoder Decoder) Builder {
-	b.decoder = decoder
-	return b
+// TODO: how to put before interceptors?
+// Would it be a traditional chain call?
+// Do we want interceptors to be any kind of functions with same mapping rules that main service function apply to?
+// Or just implement a specific interface?
+func (b builder) Before(interceptor Interceptor) Builder {
+	if b.err != nil {
+		return b
+	}
+
+	cloned := b.clone()
+	//cloned.before = interceptor
+	return cloned
+}
+
+func (b builder) Decoder(decoder Decoder) Builder {
+	if b.err != nil {
+		return b
+	}
+
+	cloned := b.clone()
+	cloned.decoder = decoder
+	return cloned
 }
 
 func (b *builder) definePathParameters() {
@@ -189,11 +207,11 @@ func (b *builder) definePathParameters() {
 		return
 	}
 
-	if !b.hasParametersIn(pathParametersGroup) {
+	pathParameters, exist := b.hasParametersIn(pathParametersGroup)
+	if !exist {
 		return
 	}
 
-	pathParameters := b.parametersBy[pathParametersGroup]
 	var converters []PathParameterConverter
 	for _, pathParameterType := range pathParameters {
 		var converter PathParameterConverter
@@ -253,11 +271,12 @@ func (b *builder) definePathParameters() {
 				}
 				converter = sliceBytePathParameterConverterSingleton
 			case reflect.Array:
-				if pathParameterType.Elem().Kind() != reflect.Uint8 {
+				returnParameterTypeElem := pathParameterType.Elem()
+				if returnParameterTypeElem.Kind() != reflect.Uint8 {
 					b.err = UnsupportedTypeError(errors.New("supports only array of bytes"))
 					return
 				}
-				converter = ArrayBytePathParameterConverter{length: pathParameterType.Len(), elementType: pathParameterType.Elem()}
+				converter = ArrayBytePathParameterConverter{length: pathParameterType.Len(), elementType: returnParameterTypeElem}
 			default:
 				b.err = UnsupportedTypeError(errors.New("for path parameter: " + pathParameterType.String()))
 				return
@@ -286,57 +305,19 @@ func (b *builder) definePathParameters() {
 	}
 }
 
-func (b *builder) By(service interface{}) Builder {
+func (b builder) Handler(service interface{}) Builder {
+	if b.err != nil {
+		return b
+	}
+
 	serviceType := reflect.TypeOf(service)
 	if serviceType.Kind() != reflect.Func {
 		b.err = InvalidMappingError(errors.New("handler is not a function/method"))
 		return b
 	}
-
-	b.groupParameters(serviceType)
-	b.defineProviders()
-
-	b.serviceValue = reflect.ValueOf(service)
-	return b
-}
-
-func (b *builder) invokeService(r *http.Request) ([]reflect.Value, error) {
-	if b.err != nil {
-		return nil, b.err
-	}
-
-	var invokeValues []reflect.Value
-
-	if b.pathParameters != nil {
-		values, err := b.pathParameters(b.pathValues(r.URL.Path))
-		if err != nil {
-			return nil, err
-		}
-		invokeValues = append(invokeValues, values...)
-	}
-
-	for _, group := range b.orderOfOtherParameters {
-		var value reflect.Value
-		var err error
-		switch group {
-		case headerParametersGroup:
-			value, err = b.headerParameters(r.Header)
-		case queryParametersGroup:
-			value, err = b.queryParameters(r.URL.Query())
-		case cookieParametersGroup:
-			value, err = b.cookieParameters(r.Cookies())
-		case bodyParametersGroup:
-			value, err = b.bodyParameters(r.Body)
-		default:
-			b.err = fmt.Errorf("undefined group in the order list: %d", group)
-		}
-		if err != nil {
-			return nil, err
-		}
-		invokeValues = append(invokeValues, value)
-	}
-
-	return b.serviceValue.Call(invokeValues), nil
+	cloned := b.clone()
+	cloned.serviceValue = reflect.ValueOf(service)
+	return cloned
 }
 
 func (b *builder) groupParameters(serviceType reflect.Type) {
@@ -358,7 +339,7 @@ func (b *builder) groupRequestPathParameters(serviceType reflect.Type) {
 	}
 
 	if serviceType.NumIn() < b.pathParamsAmount {
-		b.err = fmt.Errorf("unexpected amount of path parameters: in URI %d holders, in service function %d receivers", b.pathParamsAmount, serviceType.NumIn())
+		b.err = InvalidMappingError(fmt.Errorf("unexpected amount of path parameters: in URI %d holders, in service function %d receivers", b.pathParamsAmount, serviceType.NumIn()))
 		return
 	}
 
@@ -371,12 +352,13 @@ func (b *builder) groupRequestPathParameters(serviceType reflect.Type) {
 			reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
 			reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
 		case reflect.Slice, reflect.Array:
-			if parameterType.Elem().Kind() != reflect.Uint8 {
-				b.err = fmt.Errorf("supports only slice/array of bytes, received: %#v", parameterType.Elem())
+			returnParameterTypeElem := parameterType.Elem()
+			if returnParameterTypeElem.Kind() != reflect.Uint8 {
+				b.err = UnsupportedTypeError(fmt.Errorf("supports only slice/array of bytes, received: %#v", returnParameterTypeElem))
 				return
 			}
 		default:
-			b.err = fmt.Errorf("unsupported type for path parameter: %#v", parameterType)
+			b.err = UnsupportedTypeError(fmt.Errorf("unsupported type for path parameter: %#v", parameterType))
 			return
 		}
 		b.parametersBy[pathParametersGroup] = append(b.parametersBy[pathParametersGroup], parameterType)
@@ -414,7 +396,6 @@ func (b *builder) groupRequestOtherParameters(serviceType reflect.Type) {
 	}
 }
 
-// TODO: do convertion of response params to HTTP response
 func (b *builder) groupResponseParameters(serviceType reflect.Type) {
 	if b.hasError() {
 		return
@@ -424,26 +405,39 @@ func (b *builder) groupResponseParameters(serviceType reflect.Type) {
 		parameterType := serviceType.Out(i)
 		switch {
 		case headersType == parameterType:
-			b.parametersBy[respHeaderParametersGroup] = append(b.parametersBy[respHeaderParametersGroup], parameterType)
+			group := responseHeaderParametersGroup
+			b.parametersBy[group] = append(b.parametersBy[group], parameterType)
+			b.orderOfResponseParameters = append(b.orderOfResponseParameters, group)
 		case cookiesType == parameterType:
-			b.parametersBy[respCookieParametersGroup] = append(b.parametersBy[respCookieParametersGroup], parameterType)
+			group := responseCookieParametersGroup
+			b.parametersBy[group] = append(b.parametersBy[group], parameterType)
+			b.orderOfResponseParameters = append(b.orderOfResponseParameters, group)
 		case httpStatusType == parameterType:
-			if len(b.parametersBy[respStatusCodeParametersGroup]) > 0 {
+			group := responseStatusCodeParametersGroup
+			responseStatusCodeParametersGroupTypes := b.parametersBy[group]
+			if len(responseStatusCodeParametersGroupTypes) > 0 {
 				b.err = InvalidMappingError(errors.New("unable to map multiple response status codes"))
 				return
 			}
-			b.parametersBy[respStatusCodeParametersGroup] = append(b.parametersBy[respStatusCodeParametersGroup], parameterType)
+			b.parametersBy[group] = append(responseStatusCodeParametersGroupTypes, parameterType)
+			b.orderOfResponseParameters = append(b.orderOfResponseParameters, group)
 		case parameterType.Implements(errorType):
-			if len(b.parametersBy[respErrorParametersGroup]) > 0 {
+			group := responseErrorParametersGroup
+			responseErrorParametersGroupTypes := b.parametersBy[group]
+			if len(responseErrorParametersGroupTypes) > 0 {
 				b.err = InvalidMappingError(errors.New("unable to map multiple error return values"))
 				return
 			}
-			b.parametersBy[respErrorParametersGroup] = append(b.parametersBy[respErrorParametersGroup], parameterType)
+			b.parametersBy[group] = append(responseErrorParametersGroupTypes, parameterType)
+			b.orderOfResponseParameters = append(b.orderOfResponseParameters, group)
 		default:
-			if len(b.parametersBy[respBodyParametersGroup]) > 0 {
+			group := responseBodyParametersGroup
+			responseBodyParametersGroupTypes := b.parametersBy[group]
+			if len(responseBodyParametersGroupTypes) > 0 {
 				b.err = InvalidMappingError(errors.New("unable to map body to multiple response entities"))
 			}
-			b.parametersBy[respBodyParametersGroup] = append(b.parametersBy[respBodyParametersGroup], parameterType)
+			b.parametersBy[group] = append(responseBodyParametersGroupTypes, parameterType)
+			b.orderOfResponseParameters = append(b.orderOfResponseParameters, group)
 		}
 	}
 }
@@ -458,6 +452,12 @@ func (b *builder) defineProviders() {
 	b.defineQueryParameters()
 	b.defineCookieParameters()
 	b.defineBodyParameters()
+
+	b.defineResponseHeaderParameters()
+	b.defineResponseStatusCodeParameters()
+	b.defineResponseCookieParameters()
+	//b.defineResponseBodyParameters()
+	b.defineResponseErrorParameters()
 }
 
 func (b *builder) defineHeaderParameters() {
@@ -465,11 +465,11 @@ func (b *builder) defineHeaderParameters() {
 		return
 	}
 
-	if !b.hasParametersIn(headerParametersGroup) {
+	headerParameterTypes, exist := b.hasParametersIn(headerParametersGroup)
+	if !exist {
 		return
 	}
 
-	headerParameterTypes := b.parametersBy[headerParametersGroup]
 	if len(headerParameterTypes) > 0 {
 		b.headerParameters = func(headers http.Header) (reflect.Value, error) {
 			return reflect.ValueOf(headers), nil
@@ -482,11 +482,11 @@ func (b *builder) defineQueryParameters() {
 		return
 	}
 
-	if !b.hasParametersIn(queryParametersGroup) {
+	queryParameterTypes, exist := b.hasParametersIn(queryParametersGroup)
+	if !exist {
 		return
 	}
 
-	queryParameterTypes := b.parametersBy[queryParametersGroup]
 	if len(queryParameterTypes) > 0 {
 		b.queryParameters = func(queryValues url.Values) (reflect.Value, error) {
 			return reflect.ValueOf(queryValues), nil
@@ -499,11 +499,11 @@ func (b *builder) defineCookieParameters() {
 		return
 	}
 
-	if !b.hasParametersIn(cookieParametersGroup) {
+	cookieParameterTypes, exist := b.hasParametersIn(cookieParametersGroup)
+	if !exist {
 		return
 	}
 
-	cookieParameterTypes := b.parametersBy[cookieParametersGroup]
 	if len(cookieParameterTypes) > 0 {
 		b.cookieParameters = func(cookieValues []*http.Cookie) (reflect.Value, error) {
 			return reflect.ValueOf(cookieValues), nil
@@ -516,11 +516,11 @@ func (b *builder) defineBodyParameters() {
 		return
 	}
 
-	if !b.hasParametersIn(bodyParametersGroup) {
+	bodyParameterTypes, exist := b.hasParametersIn(bodyParametersGroup)
+	if !exist {
 		return
 	}
 
-	bodyParameterTypes := b.parametersBy[bodyParametersGroup]
 	if len(bodyParameterTypes) > 0 {
 		if b.decoder == nil {
 			b.err = errors.New("it is not possible to map request body to struct without decoder")
@@ -537,62 +537,308 @@ func (b *builder) defineBodyParameters() {
 	}
 }
 
-func (b *builder) hasParametersIn(parametersGroup int) bool {
-	return len(b.parametersBy[parametersGroup]) > 0
+func (b *builder) defineResponseHeaderParameters() {
+	if b.hasError() {
+		return
+	}
+
+	headerParameterTypes, exist := b.hasParametersIn(responseHeaderParametersGroup)
+	if !exist {
+		return
+	}
+
+	if len(headerParameterTypes) != 1 {
+		b.err = InvalidMappingError(errors.New("supports only single response headers service function return value"))
+		return
+	}
+
+	b.responseHeaderParameters = func(value reflect.Value) http.Header {
+		if value.IsNil() {
+			return nil
+		}
+		return value.Interface().(http.Header)
+	}
 }
 
-func (b *builder) Encoder(encoder Encoder) Builder {
-	b.encoder = encoder
-	return b
+func (b *builder) defineResponseStatusCodeParameters() {
+	if b.hasError() {
+		return
+	}
+
+	responseStatusCodeTypes, exist := b.hasParametersIn(responseStatusCodeParametersGroup)
+	if !exist {
+		return
+	}
+
+	if len(responseStatusCodeTypes) != 1 {
+		b.err = InvalidMappingError(errors.New("supports only single response status code service function return value"))
+		return
+	}
+
+	b.responseStatusCodeParameters = func(statusCodeValue reflect.Value) int {
+		return int(statusCodeValue.Int())
+	}
 }
 
-func (b *builder) After(interceptor Interceptor) Builder {
-	return b
+func (b *builder) defineResponseCookieParameters() {
+	if b.hasError() {
+		return
+	}
+
+	cookiesParameterTypes, exist := b.hasParametersIn(responseCookieParametersGroup)
+	if !exist {
+		return
+	}
+
+	if len(cookiesParameterTypes) != 1 {
+		b.err = InvalidMappingError(errors.New("supports only single response cookies service function return value"))
+		return
+	}
+
+	b.responseCookieParameters = func(value reflect.Value) []*http.Cookie {
+		if value.IsNil() {
+			return nil
+		}
+		return value.Interface().([]*http.Cookie)
+	}
 }
 
-func (b *builder) ErrorMapping() Builder {
-	return b
+func (b *builder) defineResponseErrorParameters() {
+	if b.hasError() {
+		return
+	}
+
+	responseErrorParameterTypes, exist := b.hasParametersIn(responseErrorParametersGroup)
+	if !exist {
+		return
+	}
+
+	if len(responseErrorParameterTypes) != 1 {
+		b.err = InvalidMappingError(errors.New("mapping of multiple error values of service function return clause is not supported"))
+		return
+	}
+
+	errorMapper := DefaultErrorMapper
+	if b.errorMapper != nil {
+		errorMapper = b.errorMapper
+	}
+	b.responseErrorParameters = errorMapper
+}
+
+func (b *builder) hasParametersIn(parametersGroup int) ([]reflect.Type, bool) {
+	parameters, found := b.parametersBy[parametersGroup]
+	return parameters, found && len(parameters) > 0
+}
+
+func (b builder) Encoder(encoder Encoder) Builder {
+	if b.err != nil {
+		return b
+	}
+
+	cloned := b.clone()
+	cloned.encoder = encoder
+	return cloned
+}
+
+// TODO: how to put after interceptors?
+// Would it be a traditional chain call?
+// Do we want interceptors to be any kind of functions with same mapping rules that main service function apply to?
+// Or just implement a specific interface?
+func (b builder) After(interceptor Interceptor) Builder {
+	if b.err != nil {
+		return b
+	}
+
+	cloned := b.clone()
+	//cloned.after = interceptor
+	return cloned
+}
+
+func (b builder) ErrorMapping(errorMapper ErrorMapper) Builder {
+	if b.err != nil {
+		return b
+	}
+
+	cloned := b.clone()
+	cloned.errorMapper = errorMapper
+	return cloned
 }
 
 func (b *builder) hasError() bool {
 	return b.err != nil
 }
 
-// TODO: body mapping is not implemented
-// TODO: error mapping: error -> StatusCode
+func (b builder) Build() EndpointProcessor {
+
+	b.groupParameters(b.serviceValue.Type())
+	b.defineProviders()
+
+	return EndpointProcessor{
+		processRequest:  b.buildProcessRequest(),
+		produceResponse: b.buildProduceResponse(),
+	}
+}
+
+func (b *builder) buildProcessRequest() func(r *http.Request) ([]reflect.Value, error) {
+	var valueCollectors []func(r *http.Request) ([]reflect.Value, error)
+
+	if b.pathParameters != nil {
+		valueCollectors = append(valueCollectors, func(r *http.Request) ([]reflect.Value, error) {
+			return b.pathParameters(b.pathValues(r.URL.Path))
+		})
+	}
+
+	for _, group := range b.orderOfOtherParameters {
+		switch group {
+		case headerParametersGroup:
+			valueCollectors = append(valueCollectors, func(r *http.Request) ([]reflect.Value, error) {
+				value, err := b.headerParameters(r.Header)
+				return []reflect.Value{value}, err
+			})
+
+		case queryParametersGroup:
+			valueCollectors = append(valueCollectors, func(r *http.Request) ([]reflect.Value, error) {
+				value, err := b.queryParameters(r.URL.Query())
+				return []reflect.Value{value}, err
+			})
+
+		case cookieParametersGroup:
+			valueCollectors = append(valueCollectors, func(r *http.Request) ([]reflect.Value, error) {
+				value, err := b.cookieParameters(r.Cookies())
+				return []reflect.Value{value}, err
+			})
+		case bodyParametersGroup:
+			valueCollectors = append(valueCollectors, func(r *http.Request) ([]reflect.Value, error) {
+				value, err := b.bodyParameters(r.Body)
+				return []reflect.Value{value}, err
+			})
+		}
+	}
+
+	return func(r *http.Request) ([]reflect.Value, error) {
+		serviceValue := b.serviceValue
+		var invokeValues []reflect.Value
+		for _, valueCollector := range valueCollectors {
+			values, err := valueCollector(r)
+			if err != nil {
+				return nil, err
+			}
+			invokeValues = append(invokeValues, values...)
+		}
+		return serviceValue.Call(invokeValues), nil
+	}
+}
+
+func (b *builder) buildProduceResponse() func(executionResult []reflect.Value, executionError error, w http.ResponseWriter, r *http.Request) error {
+	if len(b.orderOfResponseParameters) == 0 {
+		return func(executionResult []reflect.Value, executionError error, w http.ResponseWriter, r *http.Request) error {
+			return nil
+		}
+	}
+
+	responseResolvers := make(map[int]func(results []reflect.Value, w http.ResponseWriter) error)
+	errorReturnValueIndex := -1
+
+	for index, group := range b.orderOfResponseParameters {
+		switch group {
+		case responseHeaderParametersGroup:
+			index := index
+			responseResolvers[group] = func(results []reflect.Value, w http.ResponseWriter) error {
+				headers := b.responseHeaderParameters(results[index])
+				for header, values := range headers {
+					w.Header()[header] = values
+				}
+				return nil
+			}
+
+		case responseStatusCodeParametersGroup:
+			index := index
+			responseResolvers[group] = func(results []reflect.Value, w http.ResponseWriter) error {
+				w.WriteHeader(b.responseStatusCodeParameters(results[index]))
+				return nil
+			}
+
+		case responseCookieParametersGroup:
+			index := index
+			responseResolvers[group] = func(results []reflect.Value, w http.ResponseWriter) error {
+				for _, cookieValue := range b.responseCookieParameters(results[index]) {
+					http.SetCookie(w, cookieValue)
+				}
+				return nil
+			}
+
+		case responseBodyParametersGroup:
+			index := index
+			if b.encoder != nil {
+				responseResolvers[group] = func(results []reflect.Value, w http.ResponseWriter) error {
+					responseEntity := results[index]
+					if responseEntity.Kind() == reflect.Ptr && responseEntity.IsNil() {
+						return nil
+					}
+					return b.encoder(w)(responseEntity.Interface())
+				}
+				break
+			}
+
+			returnParameterType := b.parametersBy[group][0]
+			switch returnParameterType.Kind() {
+			case reflect.String:
+				responseResolvers[group] = func(results []reflect.Value, w http.ResponseWriter) error {
+					return b.encoder(w)(strings.NewReader(results[index].String()))
+				}
+
+			case reflect.Slice:
+				responseResolvers[group] = func(results []reflect.Value, w http.ResponseWriter) error {
+					return b.encoder(w)(bytes.NewReader(results[index].Interface().([]byte)))
+				}
+
+			case reflect.Array:
+				responseResolvers[group] = func(results []reflect.Value, w http.ResponseWriter) error {
+					responseEntityValue := results[index]
+					length := responseEntityValue.Len()
+					asSlice := make([]byte, length)
+					for i := 0; i < length; i++ {
+						asSlice[i] = byte(responseEntityValue.Index(i).Uint())
+					}
+					_, err := w.Write(asSlice)
+					return err
+				}
+			}
+
+		case responseErrorParametersGroup:
+			errorReturnValueIndex = index
+		}
+	}
+
+	defaultResponseProcessor := func(executionResult []reflect.Value, executionError error, w http.ResponseWriter, r *http.Request) error {
+		for _, group := range [4]int{responseStatusCodeParametersGroup, responseHeaderParametersGroup, responseCookieParametersGroup, responseBodyParametersGroup} {
+			if responseResolver, found := responseResolvers[group]; found {
+				if err := responseResolver(executionResult, w); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+
+	if errorReturnValueIndex == -1 {
+		return defaultResponseProcessor
+	} else {
+		return func(executionResult []reflect.Value, executionError error, w http.ResponseWriter, r *http.Request) error {
+			errorReturn := executionResult[errorReturnValueIndex].Interface()
+			if errorReturn == nil {
+				return defaultResponseProcessor(executionResult, executionError, w, r)
+			}
+			return b.responseErrorParameters(errorReturn.(error), w, r)
+		}
+	}
+}
+
+// TODO: do conversion of response params to HTTP response
+// - body mapping is not implemented
+// - error mapping: error -> StatusCode
+// TODO: check parameters overflow in case it is possible
 // TODO: Header parameters into user-defined types - ???
 // maybe there will be some policy in naming those user-defined types
 // TODO: make normal error reporting with error codes that signals generic cause and context specific info (maybe stack-trace)
 // TODO: make normal tests - visually check of prints is not good enough
-
-type GeneralErrorCause error
-
-var (
-	UnsupportedType = errors.New("unsupported type")
-	InvalidMapping  = errors.New("invalid mapping")
-)
-
-func UnsupportedTypeError(contextCause error) error {
-	return Error{GeneralCause: UnsupportedType, ContextCause: contextCause}
-}
-
-func InvalidMappingError(contextCause error) error {
-	return Error{GeneralCause: InvalidMapping, ContextCause: contextCause}
-}
-
-type Error struct {
-	GeneralCause GeneralErrorCause
-	ContextCause error
-}
-
-func (e Error) Error() string {
-	switch {
-	case e.GeneralCause != nil && e.ContextCause != nil:
-		return e.GeneralCause.Error() + ":" + e.ContextCause.Error()
-	case e.GeneralCause != nil:
-		return e.GeneralCause.Error()
-	case e.ContextCause != nil:
-		return e.ContextCause.Error()
-	}
-	return ""
-}

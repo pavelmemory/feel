@@ -1,8 +1,10 @@
 package main
 
 import (
+	"encoding/xml"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"net/textproto"
 	"net/url"
 	"reflect"
@@ -11,7 +13,11 @@ import (
 )
 
 type Filter string
-type Key string
+
+type Key struct {
+	Value string `xml:"value"`
+	Part  int16  `xml:"position"`
+}
 
 type service struct {
 	t *testing.T
@@ -61,21 +67,42 @@ func (s *service) CreateFilters(assortment string, id uint64, queryValues url.Va
 	if cookies[1].Name != "c2" || cookies[1].Value != "cv2" {
 		s.t.Errorf("received: %#v", cookies[1])
 	}
-	return "", nil
+	return Key{Value: "R&R", Part: 3}, nil
 }
 
 func TestAll(t *testing.T) {
 	s := service{t: t}
-	by := POST("/:assortment/filters/:id").Decoder(JSONDecoder).By(s.CreateFilters).Encoder(XMLEncoder).ErrorMapping()
+	by := POST("/:assortment/filters/:id").Decoder(JSONDecoder).Handler(s.CreateFilters).Encoder(XMLEncoder).ErrorMapping(DefaultErrorMapper)
 	r := newPOST(t, "http://localhost:8080/a1/filters/900?qv1=100&qv2=oops%3F", strings.NewReader(`["f1", "f2"]`))
 	r.Header.Set("h1", "v1")
 	r.Header.Add("h1", "v2")
 	r.AddCookie(&http.Cookie{Name: "c1", Value: "cv1"})
 	r.AddCookie(&http.Cookie{Name: "c2", Value: "cv2"})
+	w := httptest.NewRecorder()
 
-	_, err := by.(*builder).invokeService(r)
+	b := by.(builder).Build()
+	err := b.Handle(w, r)
 	if err != nil {
 		t.Error(err)
+	}
+	if w.Code != http.StatusOK {
+		t.Error("unexpected HTTP response status", w.Code)
+	}
+	contentType := w.Header().Get("Content-Type")
+	if contentType != "application/xml" {
+		t.Error("unexpected HTTP Content-Type", contentType)
+	}
+	contentLength := w.Result().ContentLength
+	if contentLength != 0 {
+		t.Error("unexpected ContentLength", contentLength)
+	}
+	var result Key
+	err = xml.NewDecoder(w.Body).Decode(&result)
+	if err != nil {
+		t.Error(err)
+	}
+	if result.Value != "R&R" || result.Part != 3 {
+		t.Error("unexpected entity", result)
 	}
 }
 
@@ -87,10 +114,12 @@ func (s *service) ArrayAsPathParameterHolder(assortment []byte) {
 
 func TestArrayAsPathParameterHolder(t *testing.T) {
 	s := service{t: t}
-	by := GET("/:assortment").By(s.ArrayAsPathParameterHolder)
+	by := GET("/:assortment").Handler(s.ArrayAsPathParameterHolder)
 	r := newGET(t, "http://localhost:8080/a1")
+	w := &httptest.ResponseRecorder{}
 
-	_, err := by.(*builder).invokeService(r)
+	b := by.(builder).Build()
+	err := b.Handle(w, r)
 	if err != nil {
 		t.Error(err)
 	}
@@ -107,10 +136,12 @@ func (s *service) MultiplePathParameterHolders(id uint16, assortment string) {
 
 func TestMultiplePathParameterHolders(t *testing.T) {
 	s := service{t: t}
-	by := GET("/some/part/:id/:assortment/here").By(s.MultiplePathParameterHolders)
+	by := GET("/some/part/:id/:assortment/here").Handler(s.MultiplePathParameterHolders)
 	r := newGET(t, "http://localhost:8080/some/part/666/POOW/here")
+	w := &httptest.ResponseRecorder{}
 
-	_, err := by.(*builder).invokeService(r)
+	b := by.(builder).Build()
+	err := b.Handle(w, r)
 	if err != nil {
 		t.Error(err)
 	}
@@ -137,10 +168,12 @@ func (s *service) UserDefinedTypeAsPathParameterHolder(assortment UserDefinedPat
 
 func TestUserDefinedTypeAsPathParameterHolder(t *testing.T) {
 	s := service{t: t}
-	by := GET("/:assortment").By(s.UserDefinedTypeAsPathParameterHolder)
+	by := GET("/:assortment").Handler(s.UserDefinedTypeAsPathParameterHolder)
 	r := newGET(t, "http://localhost:8080/a1")
+	w := &httptest.ResponseRecorder{}
 
-	_, err := by.(*builder).invokeService(r)
+	b := by.(builder).Build()
+	err := b.Handle(w, r)
 	if err != nil {
 		t.Error(err)
 	}
