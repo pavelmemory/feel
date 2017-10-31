@@ -22,6 +22,7 @@ const (
 	responseErrorParametersGroup
 	responseStatusCodeParametersGroup
 	responseHeaderParametersGroup
+	responseContentTypeParametersGroup
 	responseCookieParametersGroup
 
 	pathTemplateStart = "/:"
@@ -33,6 +34,7 @@ type Builder interface {
 	Decoder(decoder Decoder) Builder
 	Handler(service interface{}) Builder
 	Encoder(encoder Encoder) Builder
+	ResponseContentType(setter ContentType) Builder
 	After(interceptor Interceptor) Builder
 	ErrorMapping(errorMapper ErrorMapper) Builder
 	Build() EndpointProcessor
@@ -134,6 +136,7 @@ type builder struct {
 	pathValues             func(uri string) []string
 	pathParamsAmount       int
 	decoder                Decoder
+	contentTypeProvider    ContentType
 	encoder                Encoder
 	err                    error
 	parametersBy           map[int][]reflect.Type
@@ -199,6 +202,16 @@ func (b builder) Decoder(decoder Decoder) Builder {
 
 	cloned := b.clone()
 	cloned.decoder = decoder
+	return cloned
+}
+
+func (b builder) ResponseContentType(setter ContentType) Builder {
+	if b.err != nil {
+		return b
+	}
+
+	cloned := b.clone()
+	cloned.contentTypeProvider = setter
 	return cloned
 }
 
@@ -456,7 +469,6 @@ func (b *builder) defineProviders() {
 	b.defineResponseHeaderParameters()
 	b.defineResponseStatusCodeParameters()
 	b.defineResponseCookieParameters()
-	//b.defineResponseBodyParameters()
 	b.defineResponseErrorParameters()
 }
 
@@ -746,7 +758,12 @@ func (b *builder) buildProduceResponse() func(executionResult []reflect.Value, e
 			responseResolvers[group] = func(results []reflect.Value, w http.ResponseWriter) error {
 				headers := b.responseHeaderParameters(results[index])
 				for header, values := range headers {
-					w.Header()[header] = values
+					if len(values) > 0 {
+						w.Header().Set(header, values[0])
+					}
+					for _, value := range values {
+						w.Header().Add(header, value[1:])
+					}
 				}
 				return nil
 			}
@@ -810,8 +827,21 @@ func (b *builder) buildProduceResponse() func(executionResult []reflect.Value, e
 		}
 	}
 
+	if b.contentTypeProvider != nil {
+		responseResolvers[responseContentTypeParametersGroup] = func(results []reflect.Value, w http.ResponseWriter) error {
+			w.Header().Set("Content-Type", b.contentTypeProvider())
+			return nil
+		}
+	}
+
 	defaultResponseProcessor := func(executionResult []reflect.Value, executionError error, w http.ResponseWriter, r *http.Request) error {
-		for _, group := range [4]int{responseStatusCodeParametersGroup, responseHeaderParametersGroup, responseCookieParametersGroup, responseBodyParametersGroup} {
+		for _, group := range [5]int{
+			responseContentTypeParametersGroup,
+			responseHeaderParametersGroup,
+			responseCookieParametersGroup,
+			responseStatusCodeParametersGroup,
+			responseBodyParametersGroup,
+		} {
 			if responseResolver, found := responseResolvers[group]; found {
 				if err := responseResolver(executionResult, w); err != nil {
 					return err
@@ -840,5 +870,4 @@ func (b *builder) buildProduceResponse() func(executionResult []reflect.Value, e
 // TODO: check parameters overflow in case it is possible
 // TODO: Header parameters into user-defined types - ???
 // maybe there will be some policy in naming those user-defined types
-// TODO: make normal error reporting with error codes that signals generic cause and context specific info (maybe stack-trace)
 // TODO: make normal tests - visually check of prints is not good enough

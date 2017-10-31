@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/xml"
 	"io"
+	"mime"
 	"net/http"
 	"net/http/httptest"
 	"net/textproto"
@@ -72,7 +73,13 @@ func (s *service) CreateFilters(assortment string, id uint64, queryValues url.Va
 
 func TestAll(t *testing.T) {
 	s := service{t: t}
-	by := POST("/:assortment/filters/:id").Decoder(JSONDecoder).Handler(s.CreateFilters).Encoder(XMLEncoder).ErrorMapping(DefaultErrorMapper)
+	by := POST("/:assortment/filters/:id").
+		Decoder(JSONDecoder).
+		Handler(s.CreateFilters).
+		ResponseContentType(Application.XML).
+		Encoder(XMLEncoder).
+		ErrorMapping(DefaultErrorMapper)
+
 	r := newPOST(t, "http://localhost:8080/a1/filters/900?qv1=100&qv2=oops%3F", strings.NewReader(`["f1", "f2"]`))
 	r.Header.Set("h1", "v1")
 	r.Header.Add("h1", "v2")
@@ -83,19 +90,23 @@ func TestAll(t *testing.T) {
 	b := by.(builder).Build()
 	err := b.Handle(w, r)
 	if err != nil {
-		t.Error(err)
+		t.Fatal(err)
 	}
 	if w.Code != http.StatusOK {
 		t.Error("unexpected HTTP response status", w.Code)
 	}
 	contentType := w.Header().Get("Content-Type")
-	if contentType != "application/xml" {
+	mediaType, mediaTypeParams, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mediaType != "application/xml" {
 		t.Error("unexpected HTTP Content-Type", contentType)
 	}
-	contentLength := w.Result().ContentLength
-	if contentLength != 0 {
-		t.Error("unexpected ContentLength", contentLength)
+	if mediaTypeParams["charset"] != "utf-8" {
+		t.Error("unexpected HTTP Content-Type charset", mediaTypeParams["charset"])
 	}
+
 	var result Key
 	err = xml.NewDecoder(w.Body).Decode(&result)
 	if err != nil {
