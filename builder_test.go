@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"encoding/xml"
+	"errors"
 	"io"
+	"io/ioutil"
 	"mime"
 	"net/http"
 	"net/http/httptest"
@@ -21,58 +24,62 @@ type Key struct {
 }
 
 type service struct {
-	t *testing.T
+	t             *testing.T
+	createFilters func(assortment string, id uint64, queryValues url.Values, headers http.Header, filters []Filter, cookies []*http.Cookie) (int, Key, error)
 }
 
-func (s *service) CreateFilters(assortment string, id uint64, queryValues url.Values, headers http.Header, filters []Filter, cookies []*http.Cookie) (Key, error) {
-	if assortment != "a1" {
-		s.t.Errorf("received: %#v", assortment)
-	}
-	if id != 900 {
-		s.t.Errorf("received: %#v", id)
-	}
-	if len(queryValues) != 2 {
-		s.t.Errorf("received: %#v", queryValues)
-	}
-	if queryValues.Get("qv1") != "100" {
-		s.t.Errorf("received: %#v", queryValues.Get("qv1"))
-	}
-	if queryValues.Get("qv2") != "oops?" {
-		s.t.Errorf("received: %#v", queryValues.Get("qv2"))
-	}
-	if len(headers) != 2 {
-		s.t.Errorf("received: %#v", headers)
-	}
-	h1HeaderKey := textproto.CanonicalMIMEHeaderKey("h1")
-	if headers[h1HeaderKey][0] != "v1" {
-		s.t.Errorf("received: %#v", headers[h1HeaderKey][0])
-	}
-	if headers[h1HeaderKey][1] != "v2" {
-		s.t.Errorf("received: %#v", headers[h1HeaderKey][1])
-	}
-	if len(filters) != 2 {
-		s.t.Errorf("received: %#v", filters)
-	}
-	if filters[0] != "f1" {
-		s.t.Errorf("received: %#v", filters[0])
-	}
-	if filters[1] != "f2" {
-		s.t.Errorf("received: %#v", filters[1])
-	}
-	if len(cookies) != 2 {
-		s.t.Errorf("received: %#v", cookies)
-	}
-	if cookies[0].Name != "c1" || cookies[0].Value != "cv1" {
-		s.t.Errorf("received: %#v", cookies[0])
-	}
-	if cookies[1].Name != "c2" || cookies[1].Value != "cv2" {
-		s.t.Errorf("received: %#v", cookies[1])
-	}
-	return Key{Value: "R&R", Part: 3}, nil
+func (s *service) CreateFilters(assortment string, id uint64, queryValues url.Values, headers http.Header, filters []Filter, cookies []*http.Cookie) (int, Key, error) {
+	return s.createFilters(assortment, id, queryValues, headers, filters, cookies)
 }
 
 func TestAll(t *testing.T) {
-	s := service{t: t}
+	s := service{createFilters: func(assortment string, id uint64, queryValues url.Values, headers http.Header, filters []Filter, cookies []*http.Cookie) (int, Key, error) {
+		if assortment != "a1" {
+			t.Errorf("received: %#v", assortment)
+		}
+		if id != 900 {
+			t.Errorf("received: %#v", id)
+		}
+		if len(queryValues) != 2 {
+			t.Errorf("received: %#v", queryValues)
+		}
+		if queryValues.Get("qv1") != "100" {
+			t.Errorf("received: %#v", queryValues.Get("qv1"))
+		}
+		if queryValues.Get("qv2") != "oops?" {
+			t.Errorf("received: %#v", queryValues.Get("qv2"))
+		}
+		if len(headers) != 2 {
+			t.Errorf("received: %#v", headers)
+		}
+		h1HeaderKey := textproto.CanonicalMIMEHeaderKey("h1")
+		if headers[h1HeaderKey][0] != "v1" {
+			t.Errorf("received: %#v", headers[h1HeaderKey][0])
+		}
+		if headers[h1HeaderKey][1] != "v2" {
+			t.Errorf("received: %#v", headers[h1HeaderKey][1])
+		}
+		if len(filters) != 2 {
+			t.Errorf("received: %#v", filters)
+		}
+		if filters[0] != "f1" {
+			t.Errorf("received: %#v", filters[0])
+		}
+		if filters[1] != "f2" {
+			t.Errorf("received: %#v", filters[1])
+		}
+		if len(cookies) != 2 {
+			t.Errorf("received: %#v", cookies)
+		}
+		if cookies[0].Name != "c1" || cookies[0].Value != "cv1" {
+			t.Errorf("received: %#v", cookies[0])
+		}
+		if cookies[1].Name != "c2" || cookies[1].Value != "cv2" {
+			t.Errorf("received: %#v", cookies[1])
+		}
+		return http.StatusFound, Key{Value: "R&R", Part: 3}, nil
+	}}
+
 	by := POST("/:assortment/filters/:id").
 		Decoder(JSONDecoder).
 		Handler(s.CreateFilters).
@@ -92,7 +99,7 @@ func TestAll(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if w.Code != http.StatusOK {
+	if w.Code != http.StatusFound {
 		t.Error("unexpected HTTP response status", w.Code)
 	}
 	contentType := w.Header().Get("Content-Type")
@@ -187,6 +194,93 @@ func TestUserDefinedTypeAsPathParameterHolder(t *testing.T) {
 	err := b.Handle(w, r)
 	if err != nil {
 		t.Error(err)
+	}
+}
+
+func TestErrorMapper(t *testing.T) {
+	expected := errors.New("handled")
+	s := service{createFilters: func(assortment string, id uint64, queryValues url.Values, headers http.Header, filters []Filter, cookies []*http.Cookie) (int, Key, error) {
+		return 0, Key{}, expected
+	}}
+	by := POST("/:/:").Encoder(JSONEncoder).Decoder(JSONDecoder).Handler(s.CreateFilters).ErrorMapping(func(err error, w http.ResponseWriter, r *http.Request) error {
+		if err != expected {
+			t.Error(err)
+		}
+		w.Header().Set("k1", "v1")
+		w.WriteHeader(http.StatusBadRequest)
+		return nil
+	})
+	r := newPOST(t, "http://localhost:8080/a/1", strings.NewReader("[]"))
+	w := &httptest.ResponseRecorder{}
+
+	err := by.Build().Handle(w, r)
+	if err != nil {
+		t.Error(err)
+	}
+	if w.Code != http.StatusBadRequest {
+		t.Error("unexpected response code", w.Code)
+	}
+	if w.Header().Get("k1") != "v1" {
+		t.Error("unexpected headers", w.Header())
+	}
+}
+
+func TestStatusCode(t *testing.T) {
+	expected := http.StatusAlreadyReported
+	by := GET("/").Handler(func() int {
+		return expected
+	})
+
+	r := newGET(t, "http://localhost")
+	w := &httptest.ResponseRecorder{}
+
+	err := by.Build().Handle(w, r)
+	if err != nil {
+		t.Error(err)
+	}
+	if w.Code != expected {
+		t.Error("unexpected response code", w.Code)
+	}
+}
+
+func TestDefaultErrorMapper(t *testing.T) {
+	by := GET("/").Handler(func() error {
+		return errors.New("some error")
+	})
+
+	r := newGET(t, "http://localhost")
+	w := &httptest.ResponseRecorder{Body: &bytes.Buffer{}}
+
+	err := by.Build().Handle(w, r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w.Code != http.StatusInternalServerError {
+		t.Error("unexpected response code", w.Code)
+	}
+	data, err := ioutil.ReadAll(w.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(data)) != "some error" {
+		t.Error("unexpected response body:", string(data))
+	}
+}
+
+func TestDump(t *testing.T) {
+	by := GET("/").Handler(func() {})
+	r := newGET(t, "http://localhost")
+	w := &httptest.ResponseRecorder{}
+
+	err := by.Build().Handle(w, r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w.Code != http.StatusOK {
+		t.Error("unexpected response code", w.Code)
+	}
+	if len(w.Header()) > 0 {
+		t.Error("enexpected:", w.Header())
 	}
 }
 
